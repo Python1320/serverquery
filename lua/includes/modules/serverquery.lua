@@ -1,4 +1,8 @@
 --Dont touch, unfinished
+local ErrorNoHalt=ErrorNoHalt(...)
+if CLIENT and JoinServer then ErrorNoHalt=function(...)
+	MsgN(...)
+end end
 
 require 'co'
 require 'luasocket'
