@@ -209,8 +209,8 @@ local function parse_EDF(EDF,data)
 	local start
 	if hasflag( EDF  , 0x80 ) then add(t,"i2","gameport")  end
 	if hasflag( EDF , 0x10 )  then 
-		add(t,"u8","steamid1") 
-		add(t,"u8","steamid2") 
+		add(t,"u4","steamid1") 
+		add(t,"u4","steamid2") 
 	end
 	if hasflag( EDF , 0x40 )  then 
 		add(t,"u2","specport") 
