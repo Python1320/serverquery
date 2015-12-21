@@ -1,6 +1,9 @@
 --Dont touch, unfinished
-local ErrorNoHalt=ErrorNoHalt(...)
-if CLIENT and JoinServer then ErrorNoHalt=function(...)
+
+
+
+local ErrorNoHalt=ErrorNoHalt
+if MENU_DLL then ErrorNoHalt=function(...)
 	MsgN(...)
 end end
 
