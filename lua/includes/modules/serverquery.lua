@@ -457,12 +457,8 @@ function getServerInfoWorker(cb,max_parallel,max_wait,max_tries)
 end
 
 
-----------------------------
+-- challenge helper --
 
-local A2S_PLAYER = '\xFF\xFF\xFF\xFF\x55'
-local function payload_a2splayer(response)
-	return A2S_PLAYER..(response or '\xFF\xFF\xFF\xFF')
-end
 local function getchallenge(dat)
 	if dat:sub(1,5)=='\xFF\xFF\xFF\xFFA' then
 		local chall = dat:sub(6,-1)
@@ -471,284 +467,7 @@ local function getchallenge(dat)
 	end
 end
 
-local vstruct_A2S_PLAYERS = "u1 z u4 f4"
-
-local function parseA2SPlayers(entry)
-	
-	-- parse before edf
-	
-	local data = entry[3]
-	local a,b,c,d=data:byte(1,4)
-	
-	assert(a==b and b==c and c==d and d==0xff)
-	
-	--Msg"UGH " PrintTable(data)
-	
-	local responsetype,numplayers = data:byte(5,7)
-	assert(responsetype==0x44,"Invalid response type: "..responsetype)
-	
-	data = vstruct.cursor(data)
-	
-	data:seek(nil,4+2)
-	
-	local t = {}
-	entry[3] = t
-	
-	for i=1,numplayers do
-		local dat = vstruct.read(vstruct_A2S_PLAYERS,data)
-		t[#t+1]=dat
-	end
-end
-
-function playerListFetcher(cb,max_parallel,max_wait,max_tries)
-	max_parallel = max_parallel or 5
-	max_wait = max_wait or 4
-	max_tries = max_tries or 2
-	assert(max_parallel>=1 and max_parallel<10000)
-	assert(max_wait>=0.1 and max_wait<60)
-	assert(max_tries>=2 and max_tries<10000)
-	assert(isfunction(cb))
-	
-	local udp = assert(socket.udp())
-	assert(udp:setsockname('*',0))
-	assert(udp:setpeername('*'))
-	udp:settimeout(0)
-
-	local function send_req(entry)
-		local data = payload_a2splayer(entry.challenge)
-		--dbg("sendto",entry[1],entry[2],entry.challenge and "with challenge" or "no challenge")
-		local ok, err = udp:sendto(data,entry[1],entry[2])
-		if ok == nil then
-			dbg("sendto error",err,entry[1],entry[2])
-			return false,err
-		end
-		return true
-	end
-	
-	local queue = {}
-	
-	local function process_entry(entry,now)
-		
-		-- callback this thing
-		local processed = entry[3]
-		if processed~=nil then
-			if processed then
-				local challenge = getchallenge(processed)
-				--dbg("REPLY LEN",processed:len(),processed and "challenge" or "not challenge")
-				if challenge then
-					entry.challenge = challenge
-					entry[3] = nil -- not processed
-					entry[4] = nil -- no timeout yet
-				else
-				
-					local ok , err = xpcall(parseA2SPlayers,debug.traceback,entry)
-					if not ok then
-						cb(false,entry,err)
-						return true
-					end
-					cb(true,entry)
-					return true 
-				end
-			else
-				return true
-			end
-		end
-		
-		-- check if we have timed out, retry if need
-		local timeout = entry[4]
-		local retries_remaining = entry[5]
-		if timeout then
-			if now > timeout then
-				if retries_remaining <= 0 then
-					entry[4] = nil
-					cb(false,entry,'timeout')
-				else
-					entry[4] = false -- timeout
-					entry[5] = retries_remaining - 1
-					table.insert(queue,entry) -- add to the end of the queue to not break stuff
-				end
-				return true
-			end
-		end
-		
-		-- no timeout yet, set one and send request
-		if not timeout then
-			timeout = Now() + max_wait
-			entry[4] = timeout
-			if not send_req(entry) then
-				assert(false,"sendfail!?")
-			end
-		end
-		
-	end
-	
-	local function got_reply(entry,data,now)
-		entry[3] = data -- processed -> data
-		local started = entry[4] - max_wait
-		local len = now - started
-		if len<0 then len=-1 end
-		entry[4] = len -- timeout -> timespent
-		entry[5] = nil -- retrys remaining
-		--dbg('reply',entry[1],#data)
-	end
-	
-	local maxerrs = 1024
-	local function work()
-		-- process entries (timeout, finished)
-		local i = 0
-		local now = Now()
-		while i<max_parallel do
-			i=i+1
-			local entry = queue[i]
-			if entry == nil then break end
-			local ret = process_entry(entry,now)
-			if ret == true then
-				table.remove(queue,i)
-				i=i-1
-			end
-		end
-		
-		-- receive data
-		local now = Now()
-		for received_in_a_tick=0,1024 do
-			local data,ip,port=udp:receivefrom()
-			if data == nil then
-				if ip == 'timeout' then
-					break
-				else
-					print("recvfrom: "..tostring(ip))
-					maxerrs = maxerrs - 1
-					if maxerrs==0 then error"something is really broken" end
-					break
-				end
-			end
-			
-			-- find the server
-			for i=1,max_parallel do
-				local entry = queue[i]
-				
-				-- too bad
-				if entry == nil then 
-					dbg("Timed out/unknown reply from ",ip,':',port,' ',#data)
-					break
-				end
-				
-				if ip==entry[1] and port==entry[2] then
-					
-					if entry[3] then
-						dbg("Duplicate!? reply from ",ip,':',port,' ',#data)
-						break
-					end
-					
-					got_reply(entry,data,now)
-					break
-				end
-			end
-			
-		end
-		
-		return queue[1]
-		
-	end
-	
-	-- worker coroutine
-	local working
-	local function worker() 
-		working = true
-		--dbg("worker started")		
-		
-		cb(false,true,"worker started")
-		
-		co.waittick()
-		while working do
-			working = work()
-			co.waittick()
-		end
-		
-		--dbg("worker ended")
-		cb(false,false,"worker ended")
-	end
-	
-	-- start coroutine
-	local function start_worker()
-		if working then return end
-		co(worker)
-		
-		return true
-	end
-
-	-- servers to query
-	local function add_queue(ip,port)
-		local entry = {
-			ip, -- 1
-			port,
-			nil, -- 3 -- processed
-			false, -- 4 -- timeout
-			max_tries, -- 5 - retry count
-		}
-		table.insert( queue, entry )
-		start_worker()
-		return entry
-	end
-	return {
-		add_queue=add_queue,
-		stop = function() 
-			error"unimplemented"
-		end
-	}
-
-end
-
-
-----------------------------
-
-local A2S_RULES = '\xFF\xFF\xFF\xFFV'
-local function payload_a2srules(response)
-	return A2S_RULES..(response or '\xFF\xFF\xFF\xFF')
-end
-
-
-local a2s_rules_tmp={}
-local function parseA2SRules(entry)
-	
-	-- parse before edf
-	
-	local data = entry[3]
-	
-	local a,b,c,d=data:byte(1,4)
-	
-	if not a==b and b==c and c==d and d==0xff then
-		dbg("EEK",a..'.'..b..'.'..c..'.'..d)
-	end
-	
-	--Msg"UGH " PrintTable(data)
-	data = vstruct.cursor(data)
-	data:seek(nil,4)
-	
-	vstruct.read('responsetype:u1 numrules:u2',data,a2s_rules_tmp)
-	local responsetype,numrules = a2s_rules_tmp.responsetype,a2s_rules_tmp.numrules
-	
-	assert(responsetype==0x45,"Invalid response type: "..responsetype)
-	
-	dbg("num rules",numrules)
-	
-	local t = {}
-	entry[3] = t
-	
-	entry.parsing_rules = true
-	
-	for i=1,numrules do
-		vstruct.read('key:z val:z',data,a2s_rules_tmp)
-		local key,val = a2s_rules_tmp.key,a2s_rules_tmp.val
-		
-		t[key] = val
-		
-	end
-	
-	entry.parsing_rules = false
-	
-	
-end
+--- MULTIPART HELPER ---
 
 local function collapse_multipart(entry)
 	--assert part count ?
@@ -861,7 +580,11 @@ local function parse_multipart(entry,dat)
 	return ismultipart,hasallparts
 	
 end
-function serverRulesFetcher(cb,max_parallel,max_wait,max_tries)
+
+------------- the meat ------------
+
+local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,max_wait,max_tries)
+	
 	max_parallel = max_parallel or 5
 	max_wait = max_wait or 4
 	max_tries = max_tries or 1
@@ -875,9 +598,9 @@ function serverRulesFetcher(cb,max_parallel,max_wait,max_tries)
 	assert(udp:setpeername('*'))
 	udp:settimeout(0)
 
-	local function send_req(entry)		
-		local data = payload_a2srules(entry.challenge)
-		dbg("sendto",entry[1],entry[2],entry.challenge and "with challenge" or "no challenge")
+	local function send_req(entry)
+		local data = __payload__(entry.challenge)
+		--dbg("sendto",entry[1],entry[2],entry.challenge and "with challenge" or "no challenge")
 		local ok, err = udp:sendto(data,entry[1],entry[2])
 		if ok == nil then
 			dbg("sendto error",err,entry[1],entry[2])
@@ -941,7 +664,7 @@ function serverRulesFetcher(cb,max_parallel,max_wait,max_tries)
 				--dbg"parse..."
 				-- parsing
 				
-				local ok , err = xpcall(parseA2SRules,debug.traceback,entry)
+				local ok , err = xpcall(__parse__,debug.traceback,entry)
 				
 				if ok then
 					cb(true,entry)
@@ -1113,8 +836,104 @@ function serverRulesFetcher(cb,max_parallel,max_wait,max_tries)
 		end
 	}
 
+	
+end end -- GENERATE
+
+
+
+----------------------------
+
+local A2S_PLAYER = '\xFF\xFF\xFF\xFF\x55'
+local function payload_a2splayer(response)
+	return A2S_PLAYER..(response or '\xFF\xFF\xFF\xFF')
 end
 
+
+local vstruct_A2S_PLAYERS = "u1 z u4 f4"
+
+local function parseA2SPlayers(entry)
+	
+	-- parse before edf
+	
+	local data = entry[3]
+	local a,b,c,d=data:byte(1,4)
+	
+
+	assert(a==b and b==c and c==d and d==0xff,"TODO: UNIMPLEMENTED: SPLITPACKET")
+	
+	--Msg"UGH " PrintTable(data)
+	
+	local responsetype,numplayers = data:byte(5,7)
+	assert(responsetype==0x44,"Invalid response type: "..responsetype)
+	
+	data = vstruct.cursor(data)
+	
+	data:seek(nil,4+2)
+	
+	local t = {}
+	entry[3] = t
+	
+	for i=1,numplayers do
+		local dat = vstruct.read(vstruct_A2S_PLAYERS,data)
+		t[#t+1]=dat
+	end
+end
+
+
+----------------------------
+
+
+local A2S_RULES = '\xFF\xFF\xFF\xFFV'
+local function payload_a2srules(response)
+	return A2S_RULES..(response or '\xFF\xFF\xFF\xFF')
+end
+
+
+local a2s_rules_tmp={}
+local function parseA2SRules(entry)
+	
+	-- parse before edf
+	
+	local data = entry[3]
+	
+	local a,b,c,d=data:byte(1,4)
+	
+	if not a==b and b==c and c==d and d==0xff then
+		dbg("EEK",a..'.'..b..'.'..c..'.'..d)
+	end
+	
+	--Msg"UGH " PrintTable(data)
+	data = vstruct.cursor(data)
+	data:seek(nil,4)
+	
+	vstruct.read('responsetype:u1 numrules:u2',data,a2s_rules_tmp)
+	local responsetype,numrules = a2s_rules_tmp.responsetype,a2s_rules_tmp.numrules
+	
+	assert(responsetype==0x45,"Invalid response type: "..responsetype)
+	
+	dbg("num rules",numrules)
+	
+	local t = {}
+	entry[3] = t
+	
+	entry.parsing_rules = true
+	
+	for i=1,numrules do
+		vstruct.read('key:z val:z',data,a2s_rules_tmp)
+		local key,val = a2s_rules_tmp.key,a2s_rules_tmp.val
+		
+		t[key] = val
+		
+	end
+	
+	entry.parsing_rules = false
+end
+
+local function GENERATE_FETCHERS()
+	playerListFetcher=GENERATE(payload_a2splayer,parseA2SPlayers)
+	serverRulesFetcher=GENERATE(payload_a2srules,parseA2SRules)
+end
+GENERATE_FETCHERS()
 
 --[=[
 
