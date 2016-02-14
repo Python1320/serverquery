@@ -1,7 +1,40 @@
 --setfenv(1,_G)
+local NATIVE = MENU_DLL ==nil and SERVER==nil and CLIENT==nil
+
 local meta={}
 local co=setmetatable({},meta)
-_G.co=co
+local s,look = {},{}
+co.stack = s
+
+local function push(thread)
+	local n = #s+1
+	s[n]=thread
+	look[thread]=n
+	return n
+end
+
+local function pop()
+	local n = #s
+	local thread = s[n]
+	look[thread]=nil
+	s[n]=nil
+	return thread,n
+end
+
+local function peek()
+	local n = #s
+	return s[n],n
+end
+
+local function has(thread)
+	return look[thread]
+end
+
+if not NATIVE then 
+	_G.co=co
+end
+
+co._SimpleTimer = not NATIVE and timer.Simple or function() error"Please implement co._SimpleTimer" end
 
 -- todo
 --	error handler wrapper?
@@ -28,13 +61,27 @@ local function check_coroutine(thread)
 	if thread==nil then
 		thread = coroutine.running()
 	end
+	local curco = peek()
+	if curco ~= thread then 
+		error("Not inside co-style coroutine",2)
+	end
 	if not thread then
 		error("Can not call outside coroutine",2)
 	end
 end
 
-local function __re(thread,ok,t,val,...)
+local function in_co(thread)
+	if thread==nil then
+		thread = coroutine.running()
+	end
+	local curco = peek()
+	return curco == thread and thread
+end
 
+local function __re(thread,ok,t,val,...)
+	
+	pop()
+	
 	if not ok then
 		ErrorNoHalt("[CO] "..tostring(t)..'\n')
 		return
@@ -42,7 +89,7 @@ local function __re(thread,ok,t,val,...)
 	
 	if t==SLEEP then
 		--Msg"[CO] Sleep "print(val)
-		timer.Simple(val,function()
+		co._SimpleTimer(val,function()
 			co._re(thread,SLEEP)
 		end)
 		
@@ -81,23 +128,28 @@ co._re=function(thread,...)
 	
 	-- do we need this
 	if extra_state[thread] == ENDED then return end
-	
+	push(thread)
 	return __re(thread,coroutine.resume(thread,...))
 	
 end
 
 
-hook.Add(MENU_DLL and "Think" or "Tick","colib",function()
+local function Think()
 	local count=#waitticks
 	for i=count,1,-1 do
 		local thread = table.remove(waitticks,i)
 		co._re(thread,SLEEP_TICK)
 	end
-end)
+end
+co._Think=Think
+
+if not NATIVE then
+	hook.Add(MENU_DLL and "Think" or "Tick","colib",co._Think)
+end
 
 function meta:__call(func,...)
 	
-	assert(isfunction(func),"invalid parameter supplied")
+	assert(type(func)=='function',"invalid parameter supplied")
 	
 	local thread = coroutine.create(function(...)
 		func(...)
@@ -109,7 +161,7 @@ end
 
 function co.wrap(func,...)
 	
-	assert(isfunction(func),"invalid parameter supplied")
+	assert(type(func) == 'function',"invalid parameter supplied")
 	
 	local thread = coroutine.create(function(...)
 		func(...)
@@ -125,7 +177,7 @@ end
 --- If we are already in a thread, reuse it. It has to be a co thread though!
 function co.make(...)
 
-	local thread = coroutine.running()
+	local thread = in_co()
 	if thread then return false,thread end
 	
 	local func = debug.getinfo(2).func
@@ -207,7 +259,7 @@ end
 
 function co.newcb()
 	
-	local thread = coroutine.running()
+	local thread = peek()
 
 	check_coroutine(thread)
 	
@@ -268,34 +320,38 @@ function co.waitone()
 end
 
 -- extensions --
-
-function co.fetch(url)
-	
-	local ok,err = co.newcb(),co.newcb()
-	http.Fetch(url,ok,err)
-	
-	local cb,a,b,c,d=co.waitone()
-	if cb==ok then
-		return true,a,b,c,d
-	elseif cb==err then
-		return false,a,b,c,d
+if not NATIVE then
+	function co.fetch(url)
+		
+		local ok,err = co.newcb(),co.newcb()
+		http.Fetch(url,ok,err)
+		
+		local cb,a,b,c,d=co.waitone()
+		if cb==ok then
+			return true,a,b,c,d
+		elseif cb==err then
+			return false,a,b,c,d
+		end
+		
+		error"Invalid fetch callback called"
+		
 	end
-	
-	error"Invalid fetch callback called"
-	
+
+	co.PlayURL=function(url,params)
+		local cb=co.newcb()
+		sound.PlayURL(url,params or '',cb)
+		return co.waitcb(cb)
+	end
+
+	co.PlayFile=function(url,params)
+		local cb=co.newcb()
+		sound.PlayFile(url,params or '',cb)
+		return co.waitcb(cb)
+	end
+
 end
 
-co.PlayURL=function(url,params)
-	local cb=co.newcb()
-	sound.PlayURL(url,params or '',cb)
-	return co.waitcb(cb)
-end
-
-co.PlayFile=function(url,params)
-	local cb=co.newcb()
-	sound.PlayFile(url,params or '',cb)
-	return co.waitcb(cb)
-end
+return co,co._Think
 
 -- testing --
 

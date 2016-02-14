@@ -1,15 +1,17 @@
 --Dont touch, unfinished
 
 
+local NATIVE = MENU_DLL ==nil and SERVER==nil and CLIENT==nil
+
 
 local ErrorNoHalt=ErrorNoHalt
 if MENU_DLL then ErrorNoHalt=function(...)
 	MsgN(...)
 end end
 
-require 'co'
-require 'luasocket'
-require 'vstruct'
+local vstruct = require 'vstruct' or vstruct
+local co = require 'co' or co
+local socket = NATIVE and require"socket" or require 'luasocket' or luasocket or socket
 
 local Now = socket.gettime
 local todata = string.char
@@ -45,10 +47,27 @@ function payload_masterquery(region, lastipport, filter)
 	return payload
 end
 
-local masterservers = {}
-for k,v in RandomPairs{{ "208.64.200.39", 27011 }, { "208.64.200.52", 27011 }, { "208.64.200.65", 27015 } } do
-	masterservers[k]=v
+
+
+local masterservers = {{ "208.64.200.39", 27011 }, { "208.64.200.52", 27011 }, { "208.64.200.65", 27015 } }
+
+if not NATIVE then
+	math.randomseed( os.time() )
 end
+
+local function shuffleTable( t )
+	local rand = math.random
+	local iterations = #t
+	local j
+	
+	for i = iterations, 2, -1 do
+		j = rand(i)
+		t[i], t[j] = t[j], t[i]
+	end
+end
+
+shuffleTable(masterservers)
+
 
 local function query_master(master_retries_remaining,cb,filter,region,host,port,nomore)
 	local udp = assert(socket.udp())
@@ -62,7 +81,8 @@ local function query_master(master_retries_remaining,cb,filter,region,host,port,
 	local finished
 	local should_retry
 	while true do -- get a reply from master server
-	
+		
+		
 		-- if no reply for this long, bail out
 		if Now()>timeout then 
 			dbg("server ",host,port," did not reply.",should_retry and "retrying" or "abort") 
@@ -88,7 +108,7 @@ local function query_master(master_retries_remaining,cb,filter,region,host,port,
 		if dat==nil then
 			if err == 'timeout' then
 				co.waittick()
-				continue -- goto tryagain
+				goto cont -- goto tryagain
 			else
 				error(tostring(err))
 			end
@@ -128,6 +148,8 @@ local function query_master(master_retries_remaining,cb,filter,region,host,port,
 			cb(nil,"master server timeout",host,port)
 			return true
 		end
+		
+		::cont::
 		
 	end
 end
@@ -275,7 +297,7 @@ function getServerInfoWorker(cb,max_parallel,max_wait,max_tries)
 	assert(max_parallel>=1 and max_parallel<10000)
 	assert(max_wait>=0.1 and max_wait<60)
 	assert(max_tries>=1 and max_tries<10000)
-	assert(isfunction(cb))
+	assert(type(cb)=='function')
 	
 	local udp = assert(socket.udp())
 	assert(udp:setsockname('*',0))
@@ -591,7 +613,7 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 	assert(max_parallel>=1 and max_parallel<10000)
 	assert(max_wait>=0.1 and max_wait<60)
 	assert(max_tries>=1 and max_tries<10000)
-	assert(isfunction(cb))
+	assert(type(cb)=='function')
 	
 	local udp = assert(socket.udp())
 	assert(udp:setsockname('*',0))
@@ -653,7 +675,7 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 						collapse_multipart(entry)
 					else
 						--dbg"notallparts"
-						continue
+						goto cont
 					end
 				else -- collapse single message
 					dbg"notmultipart"
@@ -672,7 +694,9 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 					cb(nil,entry,err)
 				end
 				
-				return true
+				do return true end
+				
+				::cont::
 				
 			end
 		end
@@ -934,6 +958,8 @@ local function GENERATE_FETCHERS()
 	serverRulesFetcher=GENERATE(payload_a2srules,parseA2SRules)
 end
 GENERATE_FETCHERS()
+
+return _M
 
 --[=[
 
