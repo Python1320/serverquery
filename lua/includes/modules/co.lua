@@ -1,6 +1,8 @@
 --setfenv(1,_G)
 local NATIVE = MENU_DLL ==nil and SERVER==nil and CLIENT==nil
 
+local coroutine = coroutine or require'coroutine'
+
 local meta={}
 local co=setmetatable({},meta)
 local s,look = {},{}
@@ -83,7 +85,7 @@ local function __re(thread,ok,t,val,...)
 	pop()
 	
 	if not ok then
-		ErrorNoHalt("[CO] "..tostring(t)..'\n')
+		ErrorNoHalt("[CO] "..debug.traceback(thread,tostring(t))..'\n')
 		return
 	end
 	
@@ -255,6 +257,31 @@ function co.expcall(...)
 	
 end
 
+local RETURN_RESULT = {} -- pointer
+
+function co.newcb2(res)
+	
+	local thread = peek()
+
+	check_coroutine(thread)
+	
+	
+	--TODO: infinite return value support?
+	local called,_1,_2,_3,_4,_5,_6,_7
+	local CB CB = function(a,...)
+		if a == RETURN_RESULT then
+			return called,_1,_2,_3,_4,_5,_6,_7
+		end
+		
+		if in_co(thread) then
+			called,_1,_2,_3,_4,_5,_6,_7 = true,...
+			return res
+		end
+			
+		return co._re(thread,CALLBACK,CB,a,...)
+	end
+	return CB
+end
 
 
 function co.newcb()
@@ -266,6 +293,7 @@ function co.newcb()
 	--Msg"[CO] Created cb for thread "print(thread)
 	local CB CB = function(...)
 		--Msg("[CO] Callback called for thread ",thread)print("OK")
+		
 		return co._re(thread,CALLBACK,CB,...)
 	end
 	return CB
@@ -281,6 +309,7 @@ end
 local function _waitonewrap(caller,...)
 	return ...
 end
+
 function co.waitcb(cb)
 
 	if cb==nil then
@@ -289,6 +318,30 @@ function co.waitcb(cb)
 	
 	check_coroutine()
 		
+	local function wrap(ret,caller,...)
+		if ret ~= CALLBACK then
+			error("Invalid return value from yield: "..tostring(ret))
+		end
+		if caller~=cb then
+			error("Wrong callback returned")
+		end
+		return ...
+	end
+	
+	return wrap(coroutine.yield(CALLBACK))
+	
+end
+
+local function removeone(_,...) return ... end
+
+function co.waitcb2(cb)
+
+	check_coroutine()
+	
+	if (cb(RETURN_RESULT)) then
+		return removeone( cb(RETURN_RESULT) )
+	end
+	
 	local function wrap(ret,caller,...)
 		if ret ~= CALLBACK then
 			error("Invalid return value from yield: "..tostring(ret))
@@ -319,39 +372,10 @@ function co.waitone()
 	
 end
 
--- extensions --
-if not NATIVE then
-	function co.fetch(url)
-		
-		local ok,err = co.newcb(),co.newcb()
-		http.Fetch(url,ok,err)
-		
-		local cb,a,b,c,d=co.waitone()
-		if cb==ok then
-			return true,a,b,c,d
-		elseif cb==err then
-			return false,a,b,c,d
-		end
-		
-		error"Invalid fetch callback called"
-		
-	end
 
-	co.PlayURL=function(url,params)
-		local cb=co.newcb()
-		sound.PlayURL(url,params or '',cb)
-		return co.waitcb(cb)
-	end
-
-	co.PlayFile=function(url,params)
-		local cb=co.newcb()
-		sound.PlayFile(url,params or '',cb)
-		return co.waitcb(cb)
-	end
-
+if NATIVE then
+	return co,co._Think
 end
-
-return co,co._Think
 
 -- testing --
 
@@ -363,14 +387,14 @@ co.wrap(function()
 	
 	assert(w=="extern")
 	
-	local ct = CurTime()
+	local ct = os.clock()
 	co.waittick()
-	assert(ct~=CurTime())
+	assert(ct~=os.clock())
 
 	
-	local ct = CurTime()
+	local ct = os.clock()
 	co.sleep(0.2)
-	assert(ct~=CurTime())
+	assert(ct~=os.clock())
 	
 	local ok,dat,a,b,c,d = co.fetch("http://iriz.uk.to/404")
 
