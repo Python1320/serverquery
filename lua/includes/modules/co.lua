@@ -46,17 +46,22 @@ co._SimpleTimer = not NATIVE and timer.Simple or function() error"Please impleme
 
 
 local waitticks = {}
-local -- internal identifiers for error control
+local -- Unique identifiers
 	SLEEP,
 	CO_RET,
 	SLEEP_TICK,
 	CO_END,
 	CALLBACK,
 	CALL_OUTSIDE,
-	ENDED
+	CALL_OUTSIDE_NORET,
+	ENDED,
 	
-	={},{},{},{},{},{},{},{}
-
+	RETURN_RESULT,
+	
+	_
+	
+	={},{},{},{},{},{},{},{},{},{}
+	
 local extra_state = setmetatable({},{__mode='k'})
 
 local function check_coroutine(thread)
@@ -79,6 +84,8 @@ local function in_co(thread)
 	local curco = peek()
 	return curco == thread and thread
 end
+
+co.running = in_co
 
 local function __re(thread,ok,t,val,...)
 	
@@ -103,11 +110,14 @@ local function __re(thread,ok,t,val,...)
 	--elseif t==CB_ONE then -- wait for any one callback 
 	elseif t==CALL_OUTSIDE then
 		co._re(thread,CALL_OUTSIDE,val(...))
+	elseif t==CALL_OUTSIDE_NORET then
+		co._re(thread,CALL_OUTSIDE_NORET)
+		val(...)
 	elseif t==CO_END then
 		--Msg"[CO] END "print("OK")
 		extra_state[thread]=ENDED
 	elseif t==CO_RET then -- return some stuff to the callback, continue coroutine
-		co._re(thread,CO_RET)
+		--[[local discard,... = ]] co._re(thread,CO_RET)
 		return val,...
 	else
 		ErrorNoHalt("[CO] Unhandled "..tostring(t)..'\n')
@@ -257,8 +267,34 @@ function co.expcall(...)
 	
 end
 
-local RETURN_RESULT = {} -- pointer
 
+local function wrap(ret,...)
+	if ret ~= CALL_OUTSIDE_NORET then 
+		error("Invalid return value from yield: "..tostring(ret))
+	end
+	
+	assert(not (...),"noreturn returned?")
+	
+	return ...
+	
+end
+
+function co.extern_noret(func,...)
+
+	check_coroutine()
+	
+	return wrap(coroutine.yield(CALL_OUTSIDE_NORET,func,...))
+	
+end
+
+function co.expcall_noret(...)
+
+	return co.extern_noret(xpcall,...)
+	
+end
+
+
+-- LEGACY
 function co.newcb2(res)
 	
 	local thread = peek()
@@ -297,6 +333,16 @@ function co.newcb()
 		return co._re(thread,CALLBACK,CB,...)
 	end
 	return CB
+end
+
+function co.extern_waitcb(func)
+	local cb=co.newcb()
+	co.extern_noret(func,cb)
+	return co.waitcb(cb)
+end
+function co.extern_waitone(func,...)
+	co.extern_noret(func,...)
+	return co.waitone()
 end
 
 function co.ret(...)
@@ -372,12 +418,143 @@ function co.waitone()
 	
 end
 
+local function error_propagator(ok,err,...)
+	if not ok then
+		error(err)
+	end
+	
+	return err,...
+end
+	
+function co.worker(worker,...)
+	local queue = {}
+	local started
+	local task
+	local function work()
+		while queue[1] do
+			task = queue[1]
+			table.remove(queue,1)
+			started = false --failsafe?
+				task[1](true,worker(unpack(task,2)))
+			started = true
+			task=nil
+		end
+	end
+		
+	local function thread()
+		started = true
+		
+		co.waittick() -- detach thread to preserve order
+		
+		local ok,err
+		while not ok do
+			ok,err = xpcall(work,debug.traceback)
+			if not ok and err then
+				if task then
+					task[1](false,err)
+				else
+					ErrorNoHalt('[Worker] '..err..'\n')
+				end
+			end
+		end
+		started = false
+	end
+	local function resume()
+		if started then return end
+		started = true
+		co(thread)
+		
+	end
+	local function add_task( ... )
+		local cb = co.newcb()
+		queue[#queue+1] = {cb,...}
+		resume()
+		return error_propagator(co.waitcb(cb))
+	end
+	
+	return add_task,queue,...
+	
+end
+
+function co.work_cacher_filter(filter,worker,cache,...)
+	local function check_cache(key,ret1,...)
+		local cached = cache[key]
+		if cached then
+			local keep = filter(key,ret1,...)
+			if not keep then
+				cache[key] = nil
+			end
+		end
+		return ret1,...
+	end
+	local function filter_processor(key,...)
+		return check_cache(key,worker(key,...))
+	end
+	return filter_processor,cache,...
+end
+
+
+local WEAK = { __index='v' }
+function co.work_cacher(worker,weak)
+	local cache = weak and setmetatable({},WEAK) or {}
+	
+	local function cache_this(key,...)
+		cache[key]={...}
+		return ...
+	end
+	
+	local function cacher(key,...)
+		local cached = cache[key] 
+		if cached then
+			return unpack(cached)	
+		end
+		return cache_this(key,worker(key,...))
+	end
+	return cacher,cache
+end
+
+
 
 if NATIVE then
 	return co,co._Think
 end
 
 -- testing --
+
+
+
+--[[ -- Instantly returning callback handling
+local function evil(cb)
+	print("returned",cb("hello"))
+end
+local function good(cb)
+	print("Good timer startin")
+	timer.Simple(0.1,function()
+		evil(cb)
+	end)
+end
+
+
+local isevil  = true
+
+co(function()
+	local cb = co.newcb()
+	local r = co.running()
+	
+	local good = isevil and evil or good
+	
+	local ret = co.extern_waitcb(function(cb)
+		good(cb)
+	end)
+	
+	co.ret("return value to callback")
+	
+	print("runcb returned",ret)
+	print"end coro"
+end)
+
+--]]
+
 
 --[[
 
