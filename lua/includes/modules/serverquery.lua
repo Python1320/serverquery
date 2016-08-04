@@ -873,7 +873,7 @@ local function payload_a2splayer(response)
 end
 
 
-local vstruct_A2S_PLAYERS = "u1 z u4 f4"
+local vstruct_A2S_PLAYERS = "u1 z i4 f4"
 
 local function parseA2SPlayers(entry)
 	
