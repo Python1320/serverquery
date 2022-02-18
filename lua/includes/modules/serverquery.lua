@@ -1,12 +1,14 @@
---Dont touch, unfinished
-
+-- based on https://developer.valvesoftware.com/wiki/Master_Server_Query_Protocol
+-- and https://developer.valvesoftware.com/wiki/Server_queries
+-- Should work on native lua 5.1/luajit but is meant for GMod
 
 local NATIVE = MENU_DLL ==nil and SERVER==nil and CLIENT==nil
 
 
 local ErrorNoHalt=ErrorNoHalt
 if MENU_DLL then ErrorNoHalt=function(...)
-	MsgN(...)
+	print("SERVERQUERY ERROR",...)
+  print(debug.traceback())
 end end
 
 local vstruct = require 'vstruct' or vstruct
@@ -48,7 +50,7 @@ function payload_masterquery(region, lastipport, filter)
 end
 
 
-
+-- hardcoded from hl2master.steampowered.com for now
 local masterservers = {{ "208.64.200.39", 27011 }, { "208.64.200.52", 27011 }, { "208.64.200.65", 27015 } }
 
 if not NATIVE then
@@ -290,194 +292,6 @@ local function parseA2Sreply(entry)
 	
 end
 
-function getServerInfoWorker(cb,max_parallel,max_wait,max_tries)
-	max_parallel = max_parallel or 10
-	max_wait = max_wait or 4
-	max_tries = max_tries or 2
-	assert(max_parallel>=1 and max_parallel<10000)
-	assert(max_wait>=0.1 and max_wait<60)
-	assert(max_tries>=1 and max_tries<10000)
-	assert(type(cb)=='function')
-	
-	local udp = assert(socket.udp())
-	assert(udp:setsockname('*',0))
-	assert(udp:setpeername('*'))
-	udp:settimeout(0)
-
-	local function send_req(entry)
-		local ok, err = udp:sendto(A2S_INFO,entry[1],entry[2])
-		if ok == nil then
-			dbg("sendto error",err,entry[1],entry[2])
-			return false,err
-		end
-		return true
-	end
-	
-	local queue = {}
-	
-	local function process_entry(entry,now)
-		
-		-- callback this thing
-		local processed = entry[3]
-		if processed~=nil then
-			if processed then
-				local ok , err = xpcall(parseA2Sreply,debug.traceback,entry)
-				if not ok then 
-					--dbg("parse fail",entry[1],entry[2],err)
-					cb(false,entry,err)
-					return true
-				end
-				cb(true,entry)
-			end
-			return true 
-		end
-		
-		-- check if we have timed out, retry if need
-		local timeout = entry[4]
-		local retries_remaining = entry[5]
-		if timeout then
-			if now > timeout then
-				if retries_remaining <= 0 then
-					entry[4] = nil
-					cb(false,entry)
-				else
-					entry[4] = false -- timeout
-					entry[5] = retries_remaining - 1
-					table.insert(queue,entry) -- add to the end of the queue to not break stuff
-				end
-				return true
-			end
-		end
-		
-		-- no timeout yet, set one and send request
-		if not timeout then
-			timeout = Now() + max_wait
-			entry[4] = timeout
-			if not send_req(entry) then
-				assert(false,"sendfail!?")
-			end
-		end
-		
-	end
-	
-	local function got_reply(entry,data,now)
-		entry[3] = data -- processed -> data
-		local started = entry[4] - max_wait
-		local len = now - started
-		if len<0 then len=-1 end
-		entry[4] = len -- timeout -> timespent
-		entry[5] = nil -- retrys remaining
-		--dbg('reply',entry[1],#data)
-	end
-	
-	local maxerrs = 1024
-	local function work()
-		-- process entries (timeout, finished)
-		local i = 0
-		local now = Now()
-		while i<max_parallel do
-			i=i+1
-			local entry = queue[i]
-			if entry == nil then break end
-			local ret = process_entry(entry,now)
-			if ret == true then
-				table.remove(queue,i)
-				i=i-1
-			end
-		end
-		
-		-- receive data
-		local now = Now()
-		for received_in_a_tick=0,1024 do
-			local data,ip,port=udp:receivefrom()
-			if data == nil then
-				if ip == 'timeout' then
-					break
-				else
-					print("recvfrom: "..tostring(ip))
-					maxerrs = maxerrs - 1
-					if maxerrs==0 then error"something is really broken" end
-					break
-				end
-			end
-			
-			-- find the server
-			for i=1,max_parallel do
-				local entry = queue[i]
-				
-				-- too bad
-				if entry == nil then 
-					dbg("Timed out/unknown reply from ",ip,':',port,' ',#data)
-					break
-				end
-				
-				if ip==entry[1] and port==entry[2] then
-					
-					if entry[3] then
-						dbg("Duplicate!? reply from ",ip,':',port,' ',#data)
-						break
-					end
-					
-					got_reply(entry,data,now)
-					break
-				end
-			end
-			
-		end
-		
-		return queue[1]
-		
-	end
-	
-	-- worker coroutine
-	local working
-	local function worker() 
-		working = true
-		--dbg("worker started")		
-		
-		cb(false,true,"worker started")
-		
-		co.waittick()
-		while working do
-			working = work()
-			co.waittick()
-		end
-		
-		--dbg("worker ended")
-		cb(false,false,"worker ended")
-	end
-	
-	-- start coroutine
-	local function start_worker()
-		if working then return end
-		co(worker)
-		
-		return true
-	end
-
-	-- servers to query
-	local function add_queue(ip,port)
-		local entry = {
-			ip, -- 1
-			port,
-			nil, -- 3 -- processed
-			false, -- 4 -- timeout
-			max_tries, -- 5 - retry count
-		}
-		table.insert( queue, entry )
-		start_worker()
-		return entry
-	end
-	return {
-		add_queue=add_queue,
-		stop = function() 
-			working=false 
-			queue={} 
-		end
-	}
-
-end
-
 
 -- challenge helper --
 
@@ -624,6 +438,7 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 		local data = __payload__(entry.challenge)
 		--dbg("sendto",entry[1],entry[2],entry.challenge and "with challenge" or "no challenge")
 		local ok, err = udp:sendto(data,entry[1],entry[2])
+    entry.last_req_time = Now()
 		if ok == nil then
 			dbg("sendto error",err,entry[1],entry[2])
 			return false,err
@@ -635,11 +450,12 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 	
 	local function process_entry(entry,now)
 		
-		-- callback this thing
+    
 		local processed = entry[3]
 		if processed then
 			entry[3] = false
 			
+      
 			local datas = entry[6]
 			assert(datas[1])
 			
@@ -654,7 +470,9 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 					entry.challenge = challenge
 					entry[3] = false -- not processed
 					entry[4] = nil -- no timeout yet, send challenge
-					table.Empty(datas)
+					for k,v in pairs(datas) do
+              datas[k]=nil
+          end
 					break
 				end
 				
@@ -678,12 +496,13 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 						goto cont
 					end
 				else -- collapse single message
-					dbg"notmultipart"
-					assert(not next(datas),"too many messages for non multipart!?")
+					--dbg"notmultipart"
+					if next(datas) then
+            dbg("too many messages for non-multipart!?"..tostring(entry[1])..tostring(entry[2])..' '..tostring(#datas))
+          end
 					entry[3] = data
 				end
 				
-				--dbg"parse..."
 				-- parsing
 				
 				local ok , err = xpcall(__parse__,debug.traceback,entry)
@@ -754,6 +573,13 @@ local function GENERATE(__payload__,__parse__) return function(cb,max_parallel,m
 		local timeout = now + max_wait
 		entry[4] = timeout
 		
+    
+    -- Calculate the most probable ping
+    local ping_candidate = Now() - (entry.last_req_time or 0)
+    if not entry.ping or (ping_candidate < entry.ping) then
+        entry.ping=ping_candidate
+    end
+    
 	end
 	
 	local maxerrs = 1024
@@ -911,6 +737,9 @@ local A2S_RULES = '\xFF\xFF\xFF\xFFV'
 local function payload_a2srules(response)
 	return A2S_RULES..(response or '\xFF\xFF\xFF\xFF')
 end
+local function payload_a2sinfo(response)
+	return A2S_INFO..(response or '')
+end
 
 
 local a2s_rules_tmp={}
@@ -956,6 +785,8 @@ end
 local function GENERATE_FETCHERS()
 	playerListFetcher=GENERATE(payload_a2splayer,parseA2SPlayers)
 	serverRulesFetcher=GENERATE(payload_a2srules,parseA2SRules)
+  serverInfoWorker=GENERATE(payload_a2sinfo,parseA2Sreply)
+  getServerInfoWorker=serverInfoWorker
 end
 GENERATE_FETCHERS()
 
